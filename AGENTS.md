@@ -10,7 +10,7 @@ OpenCode 插件 `opencode-tencent-auth`，同时支持 CodeBuddy / WorkBuddy 的
 npm install && npm run build   # tsc 编译到 dist/
 ```
 
-无测试、无 lint、无 CI。只有 `npm run build`。
+无测试、无 lint、无 CI。只有 `npm run build`。发布走 `.github/workflows/publish.yml`：推 `v*` tag 触发，校验 tag 与 `package.json` 版本一致、阻止重复版本，`npm ci && npm run build` 后 `npm publish --access public --provenance`（依赖仓库 secret `NPM_TOKEN`）。
 
 ## 架构要点
 

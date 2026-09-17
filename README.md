@@ -154,7 +154,23 @@ npm install
 npm run build   # tsc → dist/
 ```
 
-无测试、无 lint、无 CI。产物包含 `dist/index.js` 与 `dist/provider/*.js`（4 个入口）。开发约束见 [`AGENTS.md`](./AGENTS.md)。
+无测试、无 lint。产物包含 `dist/index.js`、`dist/server.js`（npm 入口）与 `dist/provider/*.js`（4 个本地入口）。开发约束见 [`AGENTS.md`](./AGENTS.md)。
+
+## 发布（维护者）
+
+发布由 GitHub Actions 自动完成：推送 `v*` tag 触发 [`.github/workflows/publish.yml`](./.github/workflows/publish.yml)，构建后带 provenance 发布到 npm。
+
+```bash
+# 1. 更新 package.json 的 version（例如 0.2.0）
+# 2. 提交并推送
+git commit -am "chore: release v0.2.0"
+git push
+# 3. 打 tag 并推送
+git tag v0.2.0
+git push origin v0.2.0
+```
+
+前置条件：仓库 **Settings → Secrets and variables → Actions** 添加 `NPM_TOKEN`（npm Automation token）。workflow 会校验 tag 与 `package.json` 版本一致，并阻止重复发布已存在的版本；也可在 Actions 页面手动 `workflow_dispatch` 触发。
 
 ## 免责声明
 
