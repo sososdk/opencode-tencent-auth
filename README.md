@@ -1,207 +1,166 @@
-# opencode-codebuddy-auth
+# opencode-tencent-auth
 
-OpenCode 插件，用于 CodeBuddy (IOA) 认证。通过浏览器 OAuth 登录后，可在 OpenCode CLI 中使用 CodeBuddy 的对话模型。支持自动从 `/v3/config` 动态获取可用模型列表，支持国内版和国际版切换。
+OpenCode 插件：为腾讯 **CodeBuddy** / **WorkBuddy** 的 **国内版** 与 **国际版**（共 4 个 provider）提供 IOA 浏览器登录与请求认证。登录一次后即可在 OpenCode 中使用对应产品的对话模型，模型列表、积分倍率、上下文长度全部自动发现，并支持图片输入。
+
+> ⚠️ 非官方插件。所对接的是客户端内部接口，官方未承诺兼容性，请自用、风险自负。
+
+## 特性
+
+- **4 个 provider 独立槽位** —— 每个产品/环境一个 provider id，token、模型、请求互不干扰
+- **浏览器 OAuth 登录** —— `opencode providers login` 打开对应主机 IOA 登录页，自动轮询换取 token
+- **自动 token 刷新** —— 对话返回 401/403 时用真实客户端 Header 刷新并重试，无需重新登录
+- **自动模型发现** —— 启动时按 provider 拉取可用模型；显示名附带官方积分倍率与上下文长度（如 `Hy4 preview (x0.29 · 1M)`）
+- **图片输入** —— 服务端标记 `supportsImages` 的模型自动开启 `attachment` 与多模态 modalities
+- **X-Domain 自动推导** —— 优先环境变量，其次登录 token 的 `iss` 主机名，最后 provider 兜底
+
+## 支持的 Provider
+
+| Provider ID | 产品 | 环境 | Server (API) | X-Domain 兜底 | 环境变量前缀 |
+|---|---|---|---|---|---|
+| `codebuddy` | CodeBuddy | 国内版 | `https://copilot.tencent.com` | `www.codebuddy.cn` | `CODEBUDDY_` |
+| `codebuddy-intl` | CodeBuddy | 国际版 | `https://www.codebuddy.ai` | `www.codebuddy.ai` | `CODEBUDDY_` |
+| `workbuddy` | WorkBuddy | 国内版 | `https://www.workbuddy.cn` | `www.workbuddy.cn` | `WORKBUDDY_` |
+| `workbuddy-intl` | WorkBuddy | 国际版 | `https://www.workbuddy.ai` | `www.workbuddy.ai` | `WORKBUDDY_` |
+
+每个 provider 使用**固定 server**，不会根据 baseURL 推断环境。
 
 ## 安装
 
-在 `opencode.json` 中添加插件即可，三种配置方式任选其一：
+### 本地开发（推荐）
 
-#### 方式一：最简配置（推荐）
-
-只需添加插件，provider 和 models 由插件自动创建和发现：
+把 4 个入口文件按需加入 `~/.config/opencode/opencode.jsonc`：
 
 ```jsonc
 {
-  "plugin": ["opencode-codebuddy-auth"]
+  "plugin": [
+    "/absolute/path/to/opencode-tencent-auth/dist/provider/codebuddy.js",
+    "/absolute/path/to/opencode-tencent-auth/dist/provider/codebuddy-intl.js",
+    "/absolute/path/to/opencode-tencent-auth/dist/provider/workbuddy.js",
+    "/absolute/path/to/opencode-tencent-auth/dist/provider/workbuddy-intl.js"
+  ]
 }
 ```
 
-#### 方式二：声明 provider，自动发现 models
+只保留你需要的那几行即可。`config` hook 会自动创建对应的 `provider` 与 `models`，**不要**再手写 `provider` 块。
 
-手动声明 provider 配置，但无需写 models（由 `config` hook 自动注入）：
+### npm 包（发布后）
+
+每个 provider 是一个子路径导出，同样按需添加：
 
 ```jsonc
 {
-  "plugin": ["opencode-codebuddy-auth"],
-  "provider": {
-    "codebuddy": {
-      "npm": "@ai-sdk/openai-compatible",
-      "name": "CodeBuddy",
-      "options": {
-        "baseURL": "https://copilot.tencent.com/v2",
-        "setCacheKey": true
-      }
-    }
-  }
+  "plugin": [
+    "opencode-tencent-auth/codebuddy",
+    "opencode-tencent-auth/workbuddy"
+  ]
 }
 ```
 
-#### 方式三：手动声明 models
-
-完全手动控制模型列表，插件不会覆盖已有条目：
-
-```jsonc
-{
-  "plugin": ["opencode-codebuddy-auth"],
-  "provider": {
-    "codebuddy": {
-      "npm": "@ai-sdk/openai-compatible",
-      "name": "CodeBuddy",
-      "options": {
-        "baseURL": "https://copilot.tencent.com/v2",
-        "setCacheKey": true
-      },
-      "models": {
-        "auto":                    { "name": "Auto", "contextLength": 168000 },
-        "hy3-preview-agent":       { "name": "Hy3-preview", "contextLength": 192000 },
-        "glm-5v-turbo":            { "name": "GLM-5v-Turbo", "contextLength": 200000 },
-        "glm-5.1":                 { "name": "GLM-5.1", "contextLength": 200000 },
-        "glm-5.0-turbo":           { "name": "GLM-5.0-Turbo", "contextLength": 200000 },
-        "glm-4.6":                 { "name": "GLM-4.6", "contextLength": 168000 },
-        "kimi-k2.6":               { "name": "Kimi-K2.6", "contextLength": 256000 },
-        "kimi-k2.5":               { "name": "Kimi-K2.5", "contextLength": 256000 },
-        "deepseek-v4-pro":         { "name": "DeepSeek-V4-Pro", "contextLength": 1000000 },
-        "deepseek-v4-flash":       { "name": "DeepSeek-V4-Flash", "contextLength": 1000000 },
-        "deepseek-v3-2-volc":      { "name": "DeepSeek-V3.2", "contextLength": 96000 }
-      }
-    }
-  }
-}
-```
-
-> 插件通过 `config` hook 在启动时动态从 CodeBuddy API (`GET /v3/config`) 获取 craft agent 可用模型，自动注入到 `provider.codebuddy.models`。未登录时 fallback 为 `auto` 默认模型。如需覆盖，可在 `provider.codebuddy.models` 中手动声明，插件不会覆盖已有条目。
+> 为什么是 4 个入口？OpenCode 的 auth hook 每个插件实例只支持一个 `auth.provider`，且插件会按文件 URL 去重，因此必须用 4 个不同路径的入口来注册 4 个 provider。详见[工作原理](#工作原理)。
 
 ## 登录
 
 ```bash
 opencode providers login --provider codebuddy
+opencode providers login --provider codebuddy-intl
+opencode providers login --provider workbuddy
+opencode providers login --provider workbuddy-intl
 ```
 
-浏览器会打开 IOA 登录页面，完成后 token 自动保存到本地。
+浏览器会打开对应主机的 IOA 登录页，完成后控制台打印 `login success (X-Domain=...)`，token 按 provider id 分别存入 `~/.local/share/opencode/auth.json`。
 
-## 查看可用模型
+## 模型与费率
+
+登录后 `config` hook 自动拉取模型（未登录或拉取失败时 fallback 为 `auto`）：
 
 ```bash
-# 非交互式列出
 opencode models codebuddy
-
-# 交互式选择（OpenCode 内输入 /model 搜索 codebuddy）
 ```
 
-IOA 登录后，config hook 会通过 `GET /v3/config` 实时获取 craft agent 可用模型并自动注入。
+| Provider | 目录来源 | Agent |
+|---|---|---|
+| `codebuddy` / `codebuddy-intl` | `GET /v3/config` | `craft` |
+| `workbuddy-intl` | `GET /v3/config` | `cli` |
+| `workbuddy` | `GET /console/enterprises/{enterpriseId}/models` | `cli` |
 
-#### craft agent 支持的模型（来自 /v3/config 接口，可能随时更新）
-
-| 模型 ID | 名称 | 上下文 | 图片 | 推理 |
-|---------|------|--------|------|------|
-| `auto` | Auto | 168K | Yes | Yes |
-| `hy3-preview-agent` | Hy3-preview | 192K | Yes | Yes |
-| `glm-5v-turbo` | GLM-5v-Turbo | 200K | Yes | Yes |
-| `glm-5.1` | GLM-5.1 | 200K | Yes | Yes |
-| `glm-5.0-turbo` | GLM-5.0-Turbo | 200K | Yes | Yes |
-| `glm-4.6` | GLM-4.6 | 168K | No | - |
-| `kimi-k2.6` | Kimi-K2.6 | 256K | Yes | Yes |
-| `kimi-k2.5` | Kimi-K2.5 | 256K | Yes | Yes |
-| `deepseek-v4-pro` | DeepSeek-V4-Pro | 1M | Yes | Yes |
-| `deepseek-v4-flash` | DeepSeek-V4-Flash | 1M | Yes | Yes |
-| `deepseek-v3-2-volc` | DeepSeek-V3.2 | 96K | Yes | Yes |
-
-#### 动态获取模型列表
-
-```bash
-curl -H 'Accept: application/json, text/plain, */*' \
-     -H 'X-Requested-With: XMLHttpRequest' \
-     -H 'Authorization: Bearer <TOKEN>' \
-     -H 'X-User-Id: <USER_ID>' \
-     -H 'X-Domain: www.codebuddy.cn' \
-     -H 'X-Product: SaaS' \
-     -H 'X-IDE-Type: VSCode' \
-     -H 'X-IDE-Name: VSCode' \
-     -H 'X-IDE-Version: 1.119.0' \
-     -H 'X-Product-Version: 4.9.29177644' \
-     -H 'X-Request-Trace-Id: <UUID>' \
-     -H 'X-Env-ID: production' \
-     -H 'User-Agent: VSCode/1.119.0 CodeBuddy/4.9.29177644' \
-     'https://copilot.tencent.com/v3/config'
-```
-
-- `data.models` — 所有可用模型的详细信息
-- `data.agents[0].models` — craft agent 可用的模型 ID 列表
+- `workbuddy` 国内版特例：`/v3/config` 在真实 WorkBuddy 身份下不返回积分倍率，因此改走官方 console 接口（`{enterpriseId}` 缺省为 `personal`，可用 `WORKBUDDY_ENTERPRISE_ID` 指定企业版），并额外追加 `deepseek-v4-flash`。
+- 显示名格式为 `名称 (倍率 · 上下文)`，例如 `Hy4 preview (x0.29 · 1M)`、`MiniMax-M3 (x0.25 · 512K)`；无倍率时只带上下文（如 `Auto (168K)`）。
+- 上下限同时写入 opencode 的 `limit.context` / `limit.output`，用于上下文占用判断与自动压缩。
 
 ## 环境变量
 
-通过 shell `export` 设置，普通用户无需配置（JWT 自动提取）：
+普通用户无需任何配置（tenant / enterprise / user 与 X-Domain 均从 token 自动提取）。
 
 ```bash
-# 强制使用指定模型（忽略 OpenCode 模型选择）
-export CODEBUDDY_DEFAULT_MODEL=deepseek-v3-2-volc
+# 强制指定模型（忽略 OpenCode 的模型选择）
+export CODEBUDDY_DEFAULT_MODEL=deepseek-v4-pro
+export WORKBUDDY_DEFAULT_MODEL=deepseek-v4-pro
 
-# 覆盖企业/租户信息（不设置则从 JWT 自动提取）
+# 覆盖企业 / 租户 / 用户信息（不设置则从 JWT 自动提取）
 export CODEBUDDY_TENANT_ID=xxx
 export CODEBUDDY_ENTERPRISE_ID=xxx
 export CODEBUDDY_USER_ID=xxx
+# ... WORKBUDDY_ 同名变量同理
 
-opencode
+# 覆盖 X-Domain（优先级最高）
+export CODEBUDDY_DOMAIN=www.codebuddy.cn
+export WORKBUDDY_DOMAIN=www.workbuddy.cn
 ```
 
-| 变量 | 说明 | 必需 |
-|------|------|------|
-| `CODEBUDDY_DEFAULT_MODEL` | 强制使用指定模型（不设置则使用 OpenCode 选择的模型） | 否 |
-| `CODEBUDDY_TENANT_ID` | 覆盖 tenant_id（不设置则从 JWT 自动提取） | 否 |
-| `CODEBUDDY_ENTERPRISE_ID` | 覆盖 enterprise_id（不设置则从 JWT 自动提取） | 否 |
-| `CODEBUDDY_USER_ID` | 覆盖 user_id（不设置则从 JWT 自动提取） | 否 |
+| 变量 | 说明 |
+|---|---|
+| `${PREFIX}_DEFAULT_MODEL` | 强制使用指定模型 |
+| `${PREFIX}_TENANT_ID` | 覆盖 tenant_id |
+| `${PREFIX}_ENTERPRISE_ID` | 覆盖 enterprise_id（同时影响 `workbuddy` 的目录地址与企业版目录） |
+| `${PREFIX}_USER_ID` | 覆盖 user_id |
+| `${PREFIX}_DOMAIN` | 覆盖 X-Domain |
 
-## 国内版 vs 国际版
+`PREFIX` 为 `CODEBUDDY` 或 `WORKBUDDY`。
 
-默认使用**国内版**。切换国际版只需修改 `baseURL`，插件会自动检测并切换 `X-Domain`：
+## X-Domain 决策
 
-```jsonc
-{
-  "plugin": ["opencode-codebuddy-auth"],
-  "provider": {
-    "codebuddy": {
-      "options": {
-        "baseURL": "https://www.codebuddy.ai/v2"
-      }
-    }
-  }
-}
-```
-
-| 环境 | baseURL | X-Domain（自动检测） |
-|------|---------|---------|
-| 国内版（默认） | `https://copilot.tencent.com/v2` | `www.codebuddy.cn` |
-| 国际版 | `https://www.codebuddy.ai/v2` | `www.codebuddy.ai` |
-
-> 插件根据 `baseURL` 自动设置 `X-Domain`：检测到 `codebuddy.ai` 时使用 `www.codebuddy.ai`，否则默认 `www.codebuddy.cn`。
+优先级：`${PREFIX}_DOMAIN` > 登录 JWT 的 `iss` 主机名（`new URL(iss).hostname`）> provider 兜底。实现与真实客户端一致，**不**从 baseURL 推断。
 
 ## 工作原理
 
 ```
-OpenCode CLI
-  ├─ config hook → 读取 ~/.local/share/opencode/auth.json 获取 token
-  │                 调用 GET /v3/config 动态获取 craft agent 可用模型
-  │                 注入到 config.provider.codebuddy.models
-  ├─ auth hook → 浏览器 IOA OAuth → 获取 access_token + refresh_token
-  ├─ loader() → 返回 { apiKey, baseURL, fetch }
-  │              fetch 拦截所有 /chat/completions 请求
-  └─ 对话流程 → 拦截请求
-                附加认证 headers（Authorization, B3 追踪, X-Model-ID 等）
-                转发到 CodeBuddy /v2/chat/completions
-                直接透传 OpenAI 兼容 SSE 响应
+OpenCode
+  ├─ config hook   → 读 ~/.local/share/opencode/auth.json（按 provider id 分槽）
+  │                  拉取模型目录 → 注入 provider.<id>.models
+  ├─ auth hook     → 浏览器 IOA OAuth（state → 轮询）→ access_token + refresh_token
+  ├─ loader()      → 返回 { apiKey, baseURL, fetch }，拦截 /chat/completions
+  └─ chat.params   → 固定该 provider 的 baseURL
 ```
 
-- **自定义 fetch** 拦截所有 `/chat/completions` 请求，绕过 AI SDK 默认认证
-- **自动 token 刷新** — 遇到 401/403 时自动刷新 token 后重试
-- **无需 SSE 转换** — API 已直接返回标准 OpenAI 格式
+**4 个入口的必要性**：OpenCode 以 provider id 为 key 聚合所有插件实例的 auth hooks（`provider/auth.ts`），且插件配置按文件 URL 去重（`config/plugin.ts` 的 `deduplicatePluginOrigins`）。单文件无法既去重又注册多个 `auth.provider`，故拆成 `src/provider/*.ts` 四个不同路径的入口，各自 default export `{ id, server }`，由共享工厂 `TencentAuthPlugin(input, { provider })` 承载全部逻辑。
+
+**对话请求**：拦截后附加认证 headers（`Authorization`、`X-Domain`、`X-Tenant/Enterprise/User-Id`、`X-Agent-Intent`、`X-Model-ID`、B3 追踪等），转发到 `{server}/v2/chat/completions`，透传 OpenAI 兼容 SSE。X-Domain 每次由当前 access token 的 `iss` 实时计算。
+
+**Token 刷新**（`POST /v2/plugin/auth/token/refresh`，与真实客户端一致）：`Authorization: Bearer <access>`、`X-Refresh-Token`、`X-User-Id`、`X-Auth-Refresh-Source: plugin`、`X-Product`、`X-Domain`、body `{}`。
+
+**登录接口**：`POST {server}/v2/plugin/auth/state?platform=VSCode&ioa=1`（带 `X-No-*` 头）→ 轮询 `GET {server}/v2/plugin/auth/token?state=`。
+
+## 常见问题
+
+- **模型列表只有 `Auto`**：多为尚未登录或 token 失效。重新 `opencode providers login --provider <id>`；`config` hook 在拉取失败时会 fallback 为 `auto`。
+- **登录后不弹浏览器**：手动复制终端打印的授权 URL 到浏览器完成即可，插件会继续轮询。
+- **对话报 401/403**：插件会自动尝试刷新；若仍失败通常是 refresh token 也过期，重新登录。
+- **看不到积分倍率**：服务端未下发 `credits`（例如 WorkBuddy 国际版部分套餐模型）时保持原名，属正常。
+- **`workbuddy` 企业版模型不全**：设置 `WORKBUDDY_ENTERPRISE_ID`，插件会改用企业版目录。
 
 ## 开发
 
 ```bash
 npm install
-npm run build
+npm run build   # tsc → dist/
 ```
+
+无测试、无 lint、无 CI。产物包含 `dist/index.js` 与 `dist/provider/*.js`（4 个入口）。开发约束见 [`AGENTS.md`](./AGENTS.md)。
+
+## 免责声明
+
+本项目仅用于个人学习与合法用途，与腾讯及其关联公司无任何隶属关系。接口均为客户端内部实现，可能随时变更；使用者需自行承担风险。
 
 ## 许可证
 
-MIT
+[MIT](./LICENSE)

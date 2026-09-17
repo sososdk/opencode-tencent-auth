@@ -1,16 +1,24 @@
 {
-  "name": "opencode-codebuddy-auth",
-  "version": "1.0.4",
-  "description": "OpenCode plugin for CodeBuddy (IOA) authentication",
+  "name": "opencode-tencent-auth",
+  "version": "0.1.0",
+  "description": "OpenCode plugin for CodeBuddy & WorkBuddy (CN + International) IOA authentication",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
-    "./server": "./dist/index.js"
+    ".": "./dist/index.js",
+    "./server": "./dist/index.js",
+    "./codebuddy": "./dist/provider/codebuddy.js",
+    "./codebuddy-intl": "./dist/provider/codebuddy-intl.js",
+    "./workbuddy": "./dist/provider/workbuddy.js",
+    "./workbuddy-intl": "./dist/provider/workbuddy-intl.js"
   },
   "scripts": {
     "build": "tsc",
     "prepublishOnly": "tsc"
+  },
+  "engines": {
+    "node": ">=18"
   },
   "peerDependencies": {
     "@opencode-ai/plugin": ">=0.1.0"
@@ -25,10 +33,15 @@
     "opencode",
     "plugin",
     "codebuddy",
+    "workbuddy",
+    "tencent",
     "ioa",
     "authentication"
   ],
   "files": [
     "dist"
-  ]
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
 }

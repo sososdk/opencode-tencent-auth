@@ -2,7 +2,7 @@
 
 ## 项目概述
 
-OpenCode 插件，为 CodeBuddy 提供 IOA OAuth 认证和请求拦截。单文件项目，入口 `src/index.ts`。
+OpenCode 插件 `opencode-tencent-auth`，同时支持 CodeBuddy / WorkBuddy 的国内版与国际版（4 个 provider）IOA 认证与请求拦截。源码入口 `src/index.ts`，构建到 `dist/`。
 
 ## 构建
 
@@ -14,27 +14,44 @@ npm install && npm run build   # tsc 编译到 dist/
 
 ## 架构要点
 
-- `src/index.ts` 是唯一源文件，导出 `CodeBuddyAuthPlugin`（Plugin 类型）和 default export
-- 运行时作为 OpenCode 插件加载，通过自定义 `fetch` 拦截 `/chat/completions` 请求并注入 CodeBuddy 认证 headers
-- `@opencode-ai/plugin` 是 peer dependency，仅开发时安装
+- 单个共享工厂 `TencentAuthPlugin(input, options)`（`src/index.ts`），`options.provider` 决定服务哪个 provider，默认 `codebuddy`。
+- `src/provider/{codebuddy,codebuddy-intl,workbuddy,workbuddy-intl}.ts` 是 4 个独立入口，各自 default export `{ id, server }`，server 用固定 `{ provider }` 调用共享工厂。
+- 之所以拆分多入口：opencode 的 auth hook 每个插件实例只支持一个 `auth.provider`（`packages/opencode/src/provider/auth.ts` 以 provider id 为 key 聚合所有插件的 hooks），而插件配置会按 file URL 去重（`config/plugin.ts` 的 `deduplicatePluginOrigins`），所以必须用 4 个不同路径的入口注册 4 个 provider。
+- `package.json` 的 `exports` 为 4 个 provider 各提供一个子路径（`opencode-tencent-auth/codebuddy` 等）＋根入口，`files: ["dist"]`；本地使用直接指向 `dist/provider/*.js`。
+- 运行时每个实例通过 `auth.loader` 返回自定义 `fetch` 拦截 `/chat/completions`，注入 IOA 认证 headers。
 
-### 核心 Hooks
+### 核心 Hooks（每个实例各一份，只作用于自己的 provider id）
 
-1. **config** — 启动时从 `~/.local/share/opencode/auth.json` 读取已保存的 access token，调用 `GET /v3/config` 动态获取 craft agent 可用模型，注入到 `config.provider.codebuddy.models`；未登录或获取失败时 fallback 为 `auto` 默认模型；不覆盖用户手动声明的 models
-2. **auth** — IOA OAuth 登录流程（浏览器 → 轮询 token），loader 返回自定义 fetch 拦截请求
-3. **chat.params** — 设置 baseURL
+1. **config** — 创建 `provider.<id>`（`npm: @ai-sdk/openai-compatible`，baseURL `{serverUrl}/v2`）；从 `~/.local/share/opencode/auth.json` 读取本 provider 的 token 拉取模型目录注入；未登录或失败 fallback `auto`；不覆盖已声明 models。
+2. **auth** — IOA OAuth（浏览器 → 轮询 token），`provider` 为实例 id。
+3. **chat.params** — `input.model.providerID === 本 id` 时设置 `output.options.baseURL`。
 
-### 用户配置
+### X-Domain 决策
 
-`codebuddy` 不在 models.dev 数据库中，插件通过 `config` hook 自动创建 `provider.codebuddy`（如未声明），并动态注入 models。支持三种配置方式：
-1. 只加 `plugin`，不声明 provider（推荐，全自动）
-2. 声明 provider 不声明 models（自动发现模型）
-3. 手动声明 provider + models（完全手动控制）
+优先级：`${PREFIX}_DOMAIN` 环境变量 > 登录 JWT 的 `iss` hostname（`new URL(iss).hostname`）> provider 兜底。禁止按 baseURL 推断。
+
+### Provider 表（src/index.ts 顶部 `PROVIDERS`）
+
+- `codebuddy` → `https://copilot.tencent.com`，兜底 `www.codebuddy.cn`，env 前缀 `CODEBUDDY`
+- `codebuddy-intl` → `https://www.codebuddy.ai`，兜底 `www.codebuddy.ai`，env 前缀 `CODEBUDDY`
+- `workbuddy` → `https://www.workbuddy.cn`，兜底 `www.workbuddy.cn`，env 前缀 `WORKBUDDY`
+- `workbuddy-intl` → `https://www.workbuddy.ai`，兜底 `www.workbuddy.ai`，env 前缀 `WORKBUDDY`
+
+环境变量：`${PREFIX}_TENANT_ID/_ENTERPRISE_ID/_USER_ID/_DEFAULT_MODEL/_DOMAIN`。
+
+### 请求细节
+
+- 对话 headers：`buildStaticHeaders()`（Authorization、X-Domain、X-Agent-Intent、X-Product、User-Agent 等）+ `applyIdentityHeaders()`（X-Tenant/Enterprise/User-Id）+ B3 追踪/X-Model-ID，合并为 `buildAuthHeaders()`；模型发现复用 `buildStaticHeaders()` + `applyIdentityHeaders()`。X-Domain 每次从当前 access token 的 iss 计算。
+- 登录使用共享常量 `LOGIN_NO_AUTH_HEADERS`（`X-No-*` 头集）。
+- token 刷新 `/v2/plugin/auth/token/refresh`：真实客户端 Header —— `Authorization: Bearer <access>`、`X-Refresh-Token: <refresh>`、`X-User-Id`、`X-Auth-Refresh-Source: plugin`、`X-Product: SaaS`、`X-Domain`，body `{}`。
+- 登录：`POST {serverUrl}/v2/plugin/auth/state?platform=VSCode&ioa=1`（X-No-* 头）→ 轮询 `GET {serverUrl}/v2/plugin/auth/token?state=`。
+- 模型发现：`GET {serverUrl}/v3/config`（需 access token）；agent 按 provider 取 `spec.agentIntent`（codebuddy/codebuddy-intl = `craft`，workbuddy/workbuddy-intl = `cli`），`X-Agent-Intent` 头同步使用该值。例外：workbuddy 国内版因 `/v3/config` 在 WorkBuddy 身份下不返回积分倍率，改为官方 console 接口（`spec.catalogUrl`，`{enterpriseId}` 占位符按 `WORKBUDDY_ENTERPRISE_ID` 替换，缺省 `personal`；同样只要 Bearer token）作为费率与模型目录来源，并按 `spec.extraModels` 追加深海 V 系列附加模型；其余 provider 无 override。真实客户端推理走 lkeap Token Plan 网关（`api.lkeap.cloud.tencent.com`），与插件可用的设备 `/v2` 通道不互通（IOA token 401），勿改用。
+- 图片支持（PR #4 保留）：`remoteModelToConfig()` 在 `supportsImages` 时写 `attachment: true` + `modalities = { input: ["text","image"], output: ["text"] }`。
+- 模型显示名：`remoteModelToConfig()` 生成 `名称 (倍率 · 上下文)`，倍率取 `credits`（去掉尾部 ` credits`），上下文由 `formatContext()`（`maxInputTokens` → `1M`/`256K` 等）；两者都没有则用原名。`limit.context/output` 仍完整写入供 opencode 使用。
 
 ## 环境
 
-- 国内版 API：`copilot.tencent.com`，`X-Domain: www.codebuddy.cn`
-- 国际版 API：`www.codebuddy.ai`，`X-Domain: www.codebuddy.ai`
-- 切换环境需同时改 `CONFIG.serverUrl` 和 `CONFIG.domain`
-- 模型列表通过 `GET /v3/config` 获取（需 access token），可能随时变化
-- Token 存储路径：`~/.local/share/opencode/auth.json`，config hook 直接读取该文件获取 token
+- 配置文件：`~/.config/opencode/opencode.jsonc`（4 个本地 entry 注册，绝对路径 `dist/provider/*.js`；勿加手动 `provider` 块）。
+- Token 存储：`~/.local/share/opencode/auth.json`，按 provider id 分槽。
+- 机器无系统 Node，用 `/opt/node/bin`（PATH 需 export）。
+- 验证命令：`opencode providers login --provider <id>`（会打印 auth URL 并阻塞轮询，用 timeout 包裹）；4 主机 auth/state 均已 curl 验证 200。
