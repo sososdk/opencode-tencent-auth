@@ -15,9 +15,10 @@ npm install && npm run build   # tsc 编译到 dist/
 ## 架构要点
 
 - 单个共享工厂 `TencentAuthPlugin(input, options)`（`src/index.ts`），`options.provider` 决定服务哪个 provider，默认 `codebuddy`。
-- `src/provider/{codebuddy,codebuddy-intl,workbuddy,workbuddy-intl}.ts` 是 4 个独立入口，各自 default export `{ id, server }`，server 用固定 `{ provider }` 调用共享工厂。
-- 之所以拆分多入口：opencode 的 auth hook 每个插件实例只支持一个 `auth.provider`（`packages/opencode/src/provider/auth.ts` 以 provider id 为 key 聚合所有插件的 hooks），而插件配置会按 file URL 去重（`config/plugin.ts` 的 `deduplicatePluginOrigins`），所以必须用 4 个不同路径的入口注册 4 个 provider。
-- `package.json` 的 `exports` 为 4 个 provider 各提供一个子路径（`opencode-tencent-auth/codebuddy` 等）＋根入口，`files: ["dist"]`；本地使用直接指向 `dist/provider/*.js`。
+- `src/provider/{codebuddy,codebuddy-intl,workbuddy,workbuddy-intl}.ts` 是 4 个本地入口，各自 default export `{ id, server }`，server 用固定 `{ provider }` 调用共享工厂。
+- `src/server.ts` 是 npm 入口（`exports["./server"]`）：**不**导出 v1 默认对象，只具名导出 4 个插件函数。原因：opencode 对 npm 插件按**包名**去重（子路径会折叠），但 `getLegacyPlugins()` 会把模块的每个函数导出当作独立实例加载。此文件禁止出现非函数导出（loader 会对非函数导出抛 TypeError）。
+- 之所以拆分本地多入口：opencode 的 auth hook 每个插件实例只支持一个 `auth.provider`（`packages/opencode/src/provider/auth.ts` 以 provider id 为 key 聚合所有插件的 hooks），而本地插件会按 file URL 去重（`config/plugin.ts` 的 `deduplicatePluginOrigins`），所以必须用 4 个不同路径的入口注册 4 个 provider。
+- `package.json` 的 `exports`：`./server` → `dist/server.js`（npm 唯一入口），`./{provider}` 子路径仅为兼容/参考；`files: ["dist"]`；`prepare` 构建 dist 以便 git 安装。
 - 运行时每个实例通过 `auth.loader` 返回自定义 `fetch` 拦截 `/chat/completions`，注入 IOA 认证 headers。
 
 ### 核心 Hooks（每个实例各一份，只作用于自己的 provider id）

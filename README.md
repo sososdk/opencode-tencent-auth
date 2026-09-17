@@ -26,9 +26,23 @@ OpenCode 插件：为腾讯 **CodeBuddy** / **WorkBuddy** 的 **国内版** 与 
 
 ## 安装
 
-### 本地开发（推荐）
+### npm（推荐）
 
-把 4 个入口文件按需加入 `~/.config/opencode/opencode.jsonc`：
+在 `~/.config/opencode/opencode.jsonc` 加入一行即可注册**全部 4 个 provider**：
+
+```jsonc
+{
+  "plugin": ["opencode-tencent-auth"]
+}
+```
+
+OpenCode 启动时会用 Bun 自动安装并缓存到 `~/.cache/opencode/node_modules/`。
+
+> 为什么一行就行？OpenCode 对 npm 插件按**包名**去重，因此一个包只能被加载一次。本包的 npm 入口（`exports["./server"]`）不导出 v1 `{ id, server }` 默认对象，而是**具名导出 4 个插件函数**——OpenCode 的 legacy 加载路径会把每个函数导出当作独立插件实例，从而在一个包里注册 4 个 provider。副作用：npm 安装会同时启用全部 4 个 provider（登录哪一个用哪一个）。
+
+### 本地开发
+
+本地克隆后，按需把入口文件加入配置（绝对路径）：
 
 ```jsonc
 {
@@ -41,22 +55,7 @@ OpenCode 插件：为腾讯 **CodeBuddy** / **WorkBuddy** 的 **国内版** 与 
 }
 ```
 
-只保留你需要的那几行即可。`config` hook 会自动创建对应的 `provider` 与 `models`，**不要**再手写 `provider` 块。
-
-### npm 包（发布后）
-
-每个 provider 是一个子路径导出，同样按需添加：
-
-```jsonc
-{
-  "plugin": [
-    "opencode-tencent-auth/codebuddy",
-    "opencode-tencent-auth/workbuddy"
-  ]
-}
-```
-
-> 为什么是 4 个入口？OpenCode 的 auth hook 每个插件实例只支持一个 `auth.provider`，且插件会按文件 URL 去重，因此必须用 4 个不同路径的入口来注册 4 个 provider。详见[工作原理](#工作原理)。
+本地文件按**文件路径**去重，所以可以用四个独立入口精确选择需要的 provider。`config` hook 会自动创建对应的 `provider` 与 `models`，**不要**再手写 `provider` 块。
 
 ## 登录
 
@@ -132,7 +131,7 @@ OpenCode
   └─ chat.params   → 固定该 provider 的 baseURL
 ```
 
-**4 个入口的必要性**：OpenCode 以 provider id 为 key 聚合所有插件实例的 auth hooks（`provider/auth.ts`），且插件配置按文件 URL 去重（`config/plugin.ts` 的 `deduplicatePluginOrigins`）。单文件无法既去重又注册多个 `auth.provider`，故拆成 `src/provider/*.ts` 四个不同路径的入口，各自 default export `{ id, server }`，由共享工厂 `TencentAuthPlugin(input, { provider })` 承载全部逻辑。
+**为什么需要多入口 / 特殊入口**：OpenCode 以 provider id 为 key 聚合所有插件实例的 auth hooks（`provider/auth.ts`），每个实例只能注册一个 `auth.provider`。本地文件插件按**文件 URL** 去重，故拆成 `src/provider/*.ts` 四个不同路径的入口，各自 default export `{ id, server }`，由共享工厂 `TencentAuthPlugin(input, { provider })` 承载全部逻辑。npm 插件按**包名**去重（`config/plugin.ts` 的 `deduplicatePluginOrigins`），四个子路径会被折叠成一个，因此 npm 入口 `src/server.ts` 改为**具名导出 4 个插件函数**、不提供 v1 默认对象，走 OpenCode 的 legacy 多实例加载。
 
 **对话请求**：拦截后附加认证 headers（`Authorization`、`X-Domain`、`X-Tenant/Enterprise/User-Id`、`X-Agent-Intent`、`X-Model-ID`、B3 追踪等），转发到 `{server}/v2/chat/completions`，透传 OpenAI 兼容 SSE。X-Domain 每次由当前 access token 的 `iss` 实时计算。
 
