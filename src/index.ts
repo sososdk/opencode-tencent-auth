@@ -10,15 +10,28 @@ interface ProviderSpec {
   chatCompletionsPath: string;
   fallbackDomain: string;
   product: string;
-  appVersion: string;
+  /**
+   * 客户端版本（WorkBuddy 取 product.json 的 genieVersion，CodeBuddy 取构建版本）。
+   * 同时用于 X-IDE-Version / X-Product-Version / User-Agent。
+   * 真实客户端在这些字段缺失时**不发** X-Product-Version，故本字段可留空。
+   */
+  clientVersion: string;
+  /** X-IDE-Type / X-IDE-Name：WorkBuddy 桌面为 "WorkBuddy"，CodeBuddy IDE 为 "CodeBuddyIDE"。 */
   ideName: string;
   ideType: string;
-  ideVersion: string;
+  /**
+   * 完整 User-Agent。注意：CodeBuddy 服务端**要求** UA 含 `VSCode/`，
+   * 纯 `CodeBuddy/<ver>` 会返回空模型列表；WorkBuddy 服务端接受 `WorkBuddy/<ver>`。
+   */
   userAgent: string;
   envPrefix: string;
-  agentIntent: string;
+  /** 从 /v3/config 取模型目录时使用的 agent 名（WorkBuddy = cli，CodeBuddy = craft）。 */
+  modelAgentName: string;
+  /** X-Agent-Intent 头：真实 CLI 恒为 "craft"（或 meta["codebuddy.ai/mode"]）。 */
+  headerAgentIntent: string;
+  /** /v2/plugin/auth/state 的 platform 查询参数（product.authentication.attributes.platform）。 */
+  authPlatform: string;
   catalogUrl?: string;
-  extraModels?: string[];
 }
 
 export const PROVIDERS: Readonly<Record<string, ProviderSpec>> = {
@@ -29,13 +42,14 @@ export const PROVIDERS: Readonly<Record<string, ProviderSpec>> = {
     chatCompletionsPath: "/v2/chat/completions",
     fallbackDomain: "www.codebuddy.cn",
     product: "SaaS",
-    appVersion: "4.9.29177644",
-    ideName: "VSCode",
-    ideType: "VSCode",
-    ideVersion: "1.119.0",
-    userAgent: "CodeBuddy",
+    clientVersion: "4.9.29177644",
+    ideName: "CodeBuddyIDE",
+    ideType: "CodeBuddyIDE",
+    userAgent: "VSCode/1.119.0 CodeBuddy/4.9.29177644",
     envPrefix: "CODEBUDDY",
-    agentIntent: "craft",
+    modelAgentName: "craft",
+    headerAgentIntent: "craft",
+    authPlatform: "ide",
   },
   "codebuddy-intl": {
     id: "codebuddy-intl",
@@ -44,13 +58,14 @@ export const PROVIDERS: Readonly<Record<string, ProviderSpec>> = {
     chatCompletionsPath: "/v2/chat/completions",
     fallbackDomain: "www.codebuddy.ai",
     product: "SaaS",
-    appVersion: "4.9.29177644",
-    ideName: "VSCode",
-    ideType: "VSCode",
-    ideVersion: "1.119.0",
-    userAgent: "CodeBuddy",
+    clientVersion: "4.9.29177644",
+    ideName: "CodeBuddyIDE",
+    ideType: "CodeBuddyIDE",
+    userAgent: "VSCode/1.119.0 CodeBuddy/4.9.29177644",
     envPrefix: "CODEBUDDY",
-    agentIntent: "craft",
+    modelAgentName: "craft",
+    headerAgentIntent: "craft",
+    authPlatform: "ide",
   },
   workbuddy: {
     id: "workbuddy",
@@ -59,15 +74,15 @@ export const PROVIDERS: Readonly<Record<string, ProviderSpec>> = {
     chatCompletionsPath: "/v2/chat/completions",
     fallbackDomain: "www.workbuddy.cn",
     product: "SaaS",
-    appVersion: "5.5.6",
-    ideName: "VSCode",
-    ideType: "VSCode",
-    ideVersion: "1.119.0",
-    userAgent: "WorkBuddy",
+    clientVersion: "5.5.6",
+    ideName: "WorkBuddy",
+    ideType: "WorkBuddy",
+    userAgent: "WorkBuddy/5.5.6",
     envPrefix: "WORKBUDDY",
-    agentIntent: "cli",
+    modelAgentName: "cli",
+    headerAgentIntent: "craft",
+    authPlatform: "workbuddy",
     catalogUrl: "https://www.workbuddy.cn/console/enterprises/{enterpriseId}/models",
-    extraModels: ["deepseek-v4-flash"],
   },
   "workbuddy-intl": {
     id: "workbuddy-intl",
@@ -76,20 +91,19 @@ export const PROVIDERS: Readonly<Record<string, ProviderSpec>> = {
     chatCompletionsPath: "/v2/chat/completions",
     fallbackDomain: "www.workbuddy.ai",
     product: "SaaS",
-    appVersion: "1.0.0",
-    ideName: "VSCode",
-    ideType: "VSCode",
-    ideVersion: "1.119.0",
-    userAgent: "WorkBuddy",
+    clientVersion: "5.5.2",
+    ideName: "WorkBuddy",
+    ideType: "WorkBuddy",
+    userAgent: "WorkBuddy/5.5.2",
     envPrefix: "WORKBUDDY",
-    agentIntent: "cli",
+    modelAgentName: "cli",
+    headerAgentIntent: "craft",
+    authPlatform: "workbuddy-ai",
   },
 };
 
 interface Runtime {
   spec: ProviderSpec;
-  platform: string;
-  agentIntent: string;
   envId: string;
   tenantId: string;
   enterpriseId: string;
@@ -100,8 +114,6 @@ interface Runtime {
 
 interface JwtPayload {
   iss?: string;
-  tenant_id?: string;
-  tenantId?: string;
   enterprise_id?: string;
   enterpriseId?: string;
   ent_id?: string;
@@ -155,6 +167,7 @@ interface RemoteModel {
   supportsToolCall?: boolean;
   supportsImages?: boolean;
   credits?: string;
+  tags?: string[];
 }
 
 interface RemoteConfigResponse {
@@ -162,14 +175,47 @@ interface RemoteConfigResponse {
   data?: {
     agents?: Array<{ name: string; models?: string[] }>;
     models?: RemoteModel[];
+    productFeatures?: { EnableAutoModelTiers?: boolean };
   };
 }
 
+const TIER_MODEL_IDS = ["fast-model", "balanced-model", "deep-model"];
+
+const AUTO_TIER_MODELS: RemoteModel[] = [
+  {
+    id: "fast-model",
+    name: "快速",
+    credits: "x0.21",
+    maxInputTokens: 300000,
+    maxOutputTokens: 48000,
+    supportsToolCall: true,
+    supportsImages: true,
+  },
+  {
+    id: "balanced-model",
+    name: "均衡",
+    credits: "x0.65",
+    maxInputTokens: 300000,
+    maxOutputTokens: 48000,
+    supportsToolCall: true,
+    supportsImages: true,
+  },
+  {
+    id: "deep-model",
+    name: "极致",
+    credits: "x1.20",
+    maxInputTokens: 300000,
+    maxOutputTokens: 48000,
+    supportsToolCall: true,
+    supportsImages: true,
+  },
+];
+
+// 未发现任何模型时的兜底项。刻意不写 maxInputTokens/maxOutputTokens：
+// 上下文/输出长度必须来自服务端，硬编码会导致 opencode 用错误阈值做自动压缩。
 const DEFAULT_MODEL: RemoteModel = {
   id: "auto",
   name: "Auto",
-  maxInputTokens: 168000,
-  maxOutputTokens: 32000,
   supportsToolCall: true,
   supportsImages: true,
 };
@@ -180,8 +226,6 @@ function createRuntime(spec: ProviderSpec): Runtime {
   const prefix = spec.envPrefix;
   return {
     spec,
-    platform: "VSCode",
-    agentIntent: spec.agentIntent,
     envId: "production",
     tenantId: process.env[`${prefix}_TENANT_ID`] || "",
     enterpriseId: process.env[`${prefix}_ENTERPRISE_ID`] || "",
@@ -227,21 +271,25 @@ function buildStaticHeaders(
   ctx: Runtime,
 ): Record<string, string> {
   const spec = ctx.spec;
-  return {
+  const headers: Record<string, string> = {
     Accept: "application/json, text/plain, */*",
     "Content-Type": "application/json",
     "X-Requested-With": "XMLHttpRequest",
     Authorization: `Bearer ${accessToken}`,
-    "X-Agent-Intent": ctx.agentIntent,
+    "X-Agent-Intent": spec.headerAgentIntent,
     "X-IDE-Type": spec.ideType,
     "X-IDE-Name": spec.ideName,
-    "X-IDE-Version": spec.ideVersion,
-    "X-Product-Version": spec.appVersion,
     "X-Env-ID": ctx.envId,
     "X-Domain": resolveDomain(accessToken, ctx),
     "X-Product": spec.product,
-    "User-Agent": `${spec.ideName}/${spec.ideVersion} ${spec.userAgent}/${spec.appVersion}`,
+    "User-Agent": spec.userAgent,
   };
+  // 真实客户端仅在 productVersion 存在时发这两个头；本字段可留空。
+  if (spec.clientVersion) {
+    headers["X-IDE-Version"] = spec.clientVersion;
+    headers["X-Product-Version"] = spec.clientVersion;
+  }
+  return headers;
 }
 
 function applyIdentityHeaders(
@@ -326,11 +374,9 @@ function resolveDomain(accessToken: string, ctx: Runtime): string {
 
 function resolveTenantId(accessToken: string, ctx: Runtime): string {
   if (ctx.tenantId) return ctx.tenantId;
-  const p = decodeJwtPayload(accessToken);
-  if (!p) return "";
-  const iss = p.iss || "";
-  const m = iss.match(/realms\/sso-([^/]+)$/);
-  return p.tenant_id || p.tenantId || (m?.[1] || "");
+  // 客户端将 X-Tenant-Id 与 X-Enterprise-Id 设为同一个值（account.enterpriseId），
+  // 均来自企业角色；不存在独立的 sso-<tenant> 来源。
+  return resolveEnterpriseId(accessToken, ctx);
 }
 
 function resolveEnterpriseId(accessToken: string, ctx: Runtime): string {
@@ -340,7 +386,7 @@ function resolveEnterpriseId(accessToken: string, ctx: Runtime): string {
   const roles = p.realm_access?.roles || p.resource_access?.account?.roles;
   if (roles) {
     for (const r of roles) {
-      const m = r.match(/group-admin:([A-Za-z0-9-]+)/);
+      const m = r.match(/^(?:ent-member|ent-admin|ent-plugin-enabled|group-admin):([A-Za-z0-9-]+)$/);
       if (m?.[1]) return m[1];
     }
   }
@@ -371,7 +417,7 @@ const LOGIN_NO_AUTH_HEADERS: Readonly<Record<string, string>> = {
 };
 
 async function requestAuthState(ctx: Runtime): Promise<{ state: string; url: string }> {
-  const params = new URLSearchParams({ platform: ctx.platform, ioa: "1" });
+  const params = new URLSearchParams({ platform: ctx.spec.authPlatform, ioa: "1" });
   const response = await fetch(
     `${ctx.spec.serverUrl}/v2/plugin/auth/state?${params.toString()}`,
     {
@@ -392,7 +438,7 @@ async function requestAuthState(ctx: Runtime): Promise<{ state: string; url: str
   }
   const loginUrl =
     data.data.authUrl ||
-    `${ctx.spec.serverUrl}/login?platform=${ctx.platform}&state=${data.data.state}&ioa=1`;
+    `${ctx.spec.serverUrl}/login?platform=${ctx.spec.authPlatform}&state=${data.data.state}&ioa=1`;
   return { state: data.data.state, url: loginUrl };
 }
 
@@ -417,9 +463,20 @@ async function pollForToken(
       if (response.ok) {
         const data = (await response.json()) as TokenPollResponse;
         if (data.code === 0 && data.data?.accessToken) return data.data;
+        if (data.code !== 0) {
+          console.warn(
+            `[auth] token poll returned code ${data.code}: ${JSON.stringify(data)}`,
+          );
+        }
+      } else {
+        const text = await response.text().catch(() => "");
+        console.warn(
+          `[auth] token poll failed: HTTP ${response.status} - ${text.slice(0, 200)}`,
+        );
       }
-    } catch {
+    } catch (error) {
       if (signal?.aborted) return null;
+      console.warn(`[auth] token poll error: ${String(error)}`);
     }
   }
   return null;
@@ -458,27 +515,88 @@ async function refreshAccessToken(
   }
 }
 
+async function fetchConfig(
+  accessToken: string,
+  ctx: Runtime,
+): Promise<RemoteConfigResponse["data"] | null> {
+  const headers = buildStaticHeaders(accessToken, ctx);
+  applyIdentityHeaders(headers, accessToken, ctx);
+  try {
+    const resp = await fetch(`${ctx.spec.serverUrl}/v3/config`, { headers });
+    if (!resp.ok) return null;
+    const body = (await resp.json()) as RemoteConfigResponse;
+    if (body.code !== 0 || !body.data) return null;
+    return body.data;
+  } catch {
+    return null;
+  }
+}
+
+async function fetchCatalog(
+  accessToken: string,
+  ctx: Runtime,
+): Promise<RemoteConfigResponse["data"] | null> {
+  const spec = ctx.spec;
+  if (!spec.catalogUrl) return null;
+  const headers = buildStaticHeaders(accessToken, ctx);
+  applyIdentityHeaders(headers, accessToken, ctx);
+  const catalogUrl = spec.catalogUrl.replace(
+    "{enterpriseId}",
+    resolveEnterpriseId(accessToken, ctx) || "personal",
+  );
+  try {
+    const resp = await fetch(catalogUrl, { headers });
+    if (!resp.ok) return null;
+    const body = (await resp.json()) as RemoteConfigResponse;
+    if (body.code !== 0 || !body.data) return null;
+    return body.data;
+  } catch {
+    return null;
+  }
+}
+
 async function fetchRemoteModels(
   accessToken: string,
   ctx: Runtime,
 ): Promise<RemoteModel[]> {
   const spec = ctx.spec;
-  const headers = buildStaticHeaders(accessToken, ctx);
-  applyIdentityHeaders(headers, accessToken, ctx);
-  const catalogUrl = (spec.catalogUrl || `${spec.serverUrl}/v3/config`).replace(
-    "{enterpriseId}",
-    resolveEnterpriseId(accessToken, ctx) || "personal",
-  );
-  const resp = await fetch(catalogUrl, { headers });
-  if (!resp.ok) return [];
-  const body = (await resp.json()) as RemoteConfigResponse;
-  if (body.code !== 0 || !body.data) return [];
-  const allModels = body.data.models || [];
-  const modelMap = new Map(allModels.map((m) => [m.id, m]));
-  const agent = (body.data.agents || []).find((a) => a.name === ctx.agentIntent);
+  const [config, catalog] = await Promise.all([
+    fetchConfig(accessToken, ctx),
+    fetchCatalog(accessToken, ctx),
+  ]);
+
+  const preferCatalog = !!(spec.catalogUrl && catalog);
+  const primary = preferCatalog ? catalog : config;
+  if (!primary) return [];
+  const secondary = preferCatalog ? config : catalog;
+
+  const modelMap = new Map<string, RemoteModel>();
+  for (const m of secondary?.models || []) modelMap.set(m.id, m);
+  for (const m of primary.models || []) modelMap.set(m.id, m);
+
+  const agent =
+    (primary.agents || []).find((a) => a.name === spec.modelAgentName) ||
+    (secondary?.agents || []).find((a) => a.name === spec.modelAgentName);
   const agentIds = agent?.models || [];
   if (agentIds.length === 0) return [DEFAULT_MODEL];
-  const ids = [...new Set([...agentIds, ...(spec.extraModels || [])])];
+
+  const usesTiers = !!spec.catalogUrl && config?.productFeatures?.EnableAutoModelTiers !== false;
+
+  if (usesTiers) {
+    for (const m of AUTO_TIER_MODELS) {
+      if (!modelMap.has(m.id)) modelMap.set(m.id, m);
+    }
+  }
+
+  let orderedIds: string[];
+  if (usesTiers) {
+    const rest = agentIds.filter((id) => id !== "auto" && !TIER_MODEL_IDS.includes(id));
+    orderedIds = [...TIER_MODEL_IDS, ...rest];
+  } else {
+    orderedIds = [...agentIds];
+  }
+
+  const ids = [...new Set(orderedIds)];
   return ids
     .map((id) => modelMap.get(id))
     .filter((m): m is RemoteModel => !!m?.supportsToolCall);
@@ -689,6 +807,8 @@ export async function TencentAuthPlugin(
     },
     async "chat.params"(input, output) {
       if (input.model.providerID !== spec.id) return;
+      // 与 loader() 返回的 baseURL 同值：loader 设定 provider 级 base，chat.params
+      // 的 options 会覆盖单次调用，两者都指向 {serverUrl}/v2，属防御性冗余。
       output.options.baseURL = `${spec.serverUrl}/v2`;
     },
   } satisfies Hooks;

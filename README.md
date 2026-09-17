@@ -80,9 +80,10 @@ opencode models codebuddy
 |---|---|---|
 | `codebuddy` / `codebuddy-intl` | `GET /v3/config` | `craft` |
 | `workbuddy-intl` | `GET /v3/config` | `cli` |
-| `workbuddy` | `GET /console/enterprises/{enterpriseId}/models` | `cli` |
+| `workbuddy` | `GET /console/enterprises/{enterpriseId}/models`（并按 `/v3/config` 补全元数据与 Auto 三档） | `cli` |
 
-- `workbuddy` 国内版特例：`/v3/config` 在真实 WorkBuddy 身份下不返回积分倍率，因此改走官方 console 接口（`{enterpriseId}` 缺省为 `personal`，可用 `WORKBUDDY_ENTERPRISE_ID` 指定企业版），并额外追加 `deepseek-v4-flash`。
+- `workbuddy` 国内版特例：企业模型目录走官方 console 接口（`{enterpriseId}` 从登录 JWT 的 `ent-member:`/`ent-admin:` 角色解析，可用 `WORKBUDDY_ENTERPRISE_ID` 覆盖，缺省 `personal`），同时并发拉取 `/v3/config` 合并模型元数据。
+- **Auto 三档**：当服务端启用 `EnableAutoModelTiers` 时，`auto` 会被展开为客户端一致的 `快速 (x0.21)`、`均衡 (x0.65)`、`极致 (x1.20)` 三档（`fast-model` / `balanced-model` / `deep-model`），并排在目录最前；若 `/v3/config` 未下发则使用内置定义补齐。
 - 显示名格式为 `名称 (倍率 · 上下文)`，例如 `Hy4 preview (x0.29 · 1M)`、`MiniMax-M3 (x0.25 · 512K)`；无倍率时只带上下文（如 `Auto (168K)`）。
 - 上下限同时写入 opencode 的 `limit.context` / `limit.output`，用于上下文占用判断与自动压缩。
 
@@ -109,7 +110,7 @@ export WORKBUDDY_DOMAIN=www.workbuddy.cn
 | 变量 | 说明 |
 |---|---|
 | `${PREFIX}_DEFAULT_MODEL` | 强制使用指定模型 |
-| `${PREFIX}_TENANT_ID` | 覆盖 tenant_id |
+| `${PREFIX}_TENANT_ID` | 覆盖 tenant_id（缺省与企业 ID 同值） |
 | `${PREFIX}_ENTERPRISE_ID` | 覆盖 enterprise_id（同时影响 `workbuddy` 的目录地址与企业版目录） |
 | `${PREFIX}_USER_ID` | 覆盖 user_id |
 | `${PREFIX}_DOMAIN` | 覆盖 X-Domain |
@@ -133,11 +134,11 @@ OpenCode
 
 **为什么需要多入口 / 特殊入口**：OpenCode 以 provider id 为 key 聚合所有插件实例的 auth hooks（`provider/auth.ts`），每个实例只能注册一个 `auth.provider`。本地文件插件按**文件 URL** 去重，故拆成 `src/provider/*.ts` 四个不同路径的入口，各自 default export `{ id, server }`，由共享工厂 `TencentAuthPlugin(input, { provider })` 承载全部逻辑。npm 插件按**包名**去重（`config/plugin.ts` 的 `deduplicatePluginOrigins`），四个子路径会被折叠成一个，因此 npm 入口 `src/server.ts` 改为**具名导出 4 个插件函数**、不提供 v1 默认对象，走 OpenCode 的 legacy 多实例加载。
 
-**对话请求**：拦截后附加认证 headers（`Authorization`、`X-Domain`、`X-Tenant/Enterprise/User-Id`、`X-Agent-Intent`、`X-Model-ID`、B3 追踪等），转发到 `{server}/v2/chat/completions`，透传 OpenAI 兼容 SSE。X-Domain 每次由当前 access token 的 `iss` 实时计算。
+**对话请求**：拦截后附加认证 headers（`Authorization`、`X-Domain`、`X-Tenant/Enterprise/User-Id`、`X-Agent-Intent`、`X-IDE-Type/Name/Version`、`X-Product`、`X-Model-ID`、B3 追踪等），转发到 `{server}/v2/chat/completions`，透传 OpenAI 兼容 SSE。X-Domain 每次由当前 access token 的 `iss` 实时计算。客户端身份头（`ideType`/`ideName`/`userAgent`/`clientVersion`）按 provider 区分为 `CodeBuddyIDE` 与 `WorkBuddy`，其中 CodeBuddy 服务端要求 `User-Agent` 含 `VSCode/`。
 
 **Token 刷新**（`POST /v2/plugin/auth/token/refresh`，与真实客户端一致）：`Authorization: Bearer <access>`、`X-Refresh-Token`、`X-User-Id`、`X-Auth-Refresh-Source: plugin`、`X-Product`、`X-Domain`、body `{}`。
 
-**登录接口**：`POST {server}/v2/plugin/auth/state?platform=VSCode&ioa=1`（带 `X-No-*` 头）→ 轮询 `GET {server}/v2/plugin/auth/token?state=`。
+**登录接口**：`POST {server}/v2/plugin/auth/state?platform={authPlatform}&ioa=1`（带 `X-No-*` 头）→ 轮询 `GET {server}/v2/plugin/auth/token?state=`。`authPlatform` 取自各客户端 `product.authentication.attributes.platform`：CodeBuddy = `ide`，WorkBuddy 国内 = `workbuddy`，国际 = `workbuddy-ai`。
 
 ## 常见问题
 
