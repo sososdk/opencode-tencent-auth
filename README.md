@@ -158,19 +158,34 @@ npm run build   # tsc → dist/
 
 ## 发布（维护者）
 
-发布由 GitHub Actions 自动完成：推送 `v*` tag 触发 [`.github/workflows/publish.yml`](./.github/workflows/publish.yml)，构建后带 provenance 发布到 npm。
+发布由 GitHub Actions 通过 **npm Trusted Publishing（OIDC）** 自动完成：推送 `v*` tag 触发 [`.github/workflows/publish.yml`](./.github/workflows/publish.yml)，构建后自动发布并生成 provenance，**无需 `NPM_TOKEN`** 等长期凭据。
 
 ```bash
 # 1. 更新 package.json 的 version（例如 0.2.0）
 # 2. 提交并推送
 git commit -am "chore: release v0.2.0"
 git push
-# 3. 打 tag 并推送
+# 3. 打 tag 并推送（触发发布）
 git tag v0.2.0
 git push origin v0.2.0
 ```
 
-前置条件：仓库 **Settings → Secrets and variables → Actions** 添加 `NPM_TOKEN`（npm Automation token）。workflow 会校验 tag 与 `package.json` 版本一致，并阻止重复发布已存在的版本；也可在 Actions 页面手动 `workflow_dispatch` 触发。
+workflow 会校验 tag 与 `package.json` 版本一致，并阻止重复发布已存在的版本；也可在 Actions 页面手动 `workflow_dispatch` 触发。
+
+### 一次性初始化（首次发布前）
+
+Trusted Publishing 要求**包已存在于 npm**，因此首次需要手动发布一次，之后即可完全依赖 OIDC：
+
+```bash
+npm login
+npm publish --access public   # 首次手动发布，创建 npm 包
+```
+
+然后在 npmjs.com → 该包 → **Settings → Trusted publishing** 添加：Provider `GitHub Actions`、Organization/user `sososdk`、Repository `opencode-tencent-auth`、Workflow filename `publish.yml`、勾选允许 `npm publish`。
+
+配置完成后，建议在 **Settings → Publishing access** 选择 *Require two-factor authentication and disallow tokens*，彻底禁用传统 token（不影响 Trusted Publishing）。
+
+> 注意：`package.json` 的 `repository.url` 必须与 GitHub 仓库一致，否则 OIDC 校验会失败。
 
 ## 免责声明
 
