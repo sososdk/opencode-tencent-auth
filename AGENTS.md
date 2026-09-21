@@ -67,6 +67,11 @@ npm install && npm run build   # tsc 编译到 dist/
   - 真实客户端推理走 lkeap Token Plan 网关（`api.lkeap.cloud.tencent.com`），与插件可用的设备 `/v2` 通道不互通（IOA token 401），勿改用。
 - 图片支持（PR #4 保留）：`remoteModelToConfig()` 在 `supportsImages` 时写 `attachment: true` + `modalities = { input: ["text","image"], output: ["text"] }`。
 - 模型显示名：`remoteModelToConfig()` 生成 `名称 (倍率 · 上下文)`，倍率取 `credits`（去掉尾部 ` credits`），上下文由 `formatContext()`（`maxInputTokens` → `1M`/`256K` 等）；两者都没有则用原名。`limit.context/output` 仍完整写入供 opencode 使用。
+- 积分余额（`fetchCredits()`，`config` hook 中与模型发现并发，超时同 `DISCOVERY_TIMEOUT_MS`）：按 `resolveEnterpriseId()` 是否有值分两路，成功后把结果拼进 `config.provider[id].name`（如 `WorkBuddy · 积分 910.56/2000`，无 UI 槽位故用 provider 显示名承载）：
+  - 企业账号：`POST {serverUrl}/v2/billing/meter/get-enterprise-user-usage`（带身份头，含 `X-Enterprise-Id`），取 `data.credit`（剩余）/`data.limitNum`（总额，`-1` 表示不限）。
+  - 个人账号：`POST {serverUrl}/billing/meter/get-user-resource-summary`（**无 `/v2` 前缀**，国际版 `www.*.ai` 只有此路径，带 `/v2` 会 404），累加 `data.Packages[].CycleRemainCapacity`（剩余）/`CycleTotalCapacity`（总额），单位为 credit。
+- 账号名称（`resolveAccountName()`，纯本地解 JWT，无需请求）：按 `nickname` → `preferred_username` → `name` → `email` 取第一个非空值。国内版为 `nickname`（手机号），国际版无 `nickname`/`name`，回退 `email`。与积分一起拼进 `config.provider[id].name`，顺序为 `{spec.name} · {账号} · {积分}`（如 `WorkBuddy · 18924640874 · 积分 910.56/2000`）。
+- 未登录或请求失败时 `fetchCredits` 返回 `null`，积分段省略；账号解析失败则账号段省略，provider 名至少保留 `spec.name`。
 
 ## 环境
 

@@ -122,6 +122,10 @@ interface JwtPayload {
   userId?: string;
   uid?: string;
   sub?: string;
+  nickname?: string;
+  preferred_username?: string;
+  name?: string;
+  email?: string;
   realm_access?: { roles?: string[] };
   resource_access?: { account?: { roles?: string[] } };
 }
@@ -177,6 +181,30 @@ interface RemoteConfigResponse {
     models?: RemoteModel[];
     productFeatures?: { EnableAutoModelTiers?: boolean };
   };
+}
+
+interface EnterpriseUsageResponse {
+  code: number;
+  data?: {
+    credit?: number;
+    limitNum?: number;
+  };
+}
+
+interface ResourceSummaryResponse {
+  code: number;
+  data?: {
+    Packages?: Array<{
+      CycleTotalCapacity?: string | number;
+      CycleRemainCapacity?: string | number;
+    }>;
+  };
+}
+
+interface CreditBalance {
+  remaining: number;
+  total: number;
+  unlimited: boolean;
 }
 
 const TIER_MODEL_IDS = ["fast-model", "balanced-model", "deep-model"];
@@ -246,6 +274,13 @@ function formatContext(tokens: number | undefined): string {
     return `${Number.isInteger(k) ? k : Math.round(k)}K`;
   }
   return String(tokens);
+}
+
+function formatCredits(b: CreditBalance): string {
+  if (b.unlimited) return "积分不限";
+  const fmt = (n: number) =>
+    Number.isInteger(n) ? String(n) : n.toFixed(2).replace(/\.?0+$/, "");
+  return `积分 ${fmt(b.remaining)}/${fmt(b.total)}`;
 }
 
 function remoteModelToConfig(m: RemoteModel): Record<string, unknown> {
@@ -397,6 +432,12 @@ function resolveUserId(accessToken: string, ctx: Runtime): string {
   if (ctx.userId) return ctx.userId;
   const p = decodeJwtPayload(accessToken);
   return p?.user_id || p?.userId || p?.uid || p?.sub || "";
+}
+
+function resolveAccountName(accessToken: string): string {
+  const p = decodeJwtPayload(accessToken);
+  if (!p) return "";
+  return p.nickname || p.preferred_username || p.name || p.email || "";
 }
 
 function resolveModel(inputModel: string | undefined, ctx: Runtime): string {
@@ -555,6 +596,47 @@ async function fetchCatalog(
   }
 }
 
+async function fetchCredits(
+  accessToken: string,
+  ctx: Runtime,
+): Promise<CreditBalance | null> {
+  const headers = buildStaticHeaders(accessToken, ctx);
+  applyIdentityHeaders(headers, accessToken, ctx);
+  const enterpriseId = resolveEnterpriseId(accessToken, ctx);
+
+  try {
+    if (enterpriseId) {
+      const resp = await fetch(
+        `${ctx.spec.serverUrl}/v2/billing/meter/get-enterprise-user-usage`,
+        { method: "POST", headers, body: "{}" },
+      );
+      if (!resp.ok) return null;
+      const body = (await resp.json()) as EnterpriseUsageResponse;
+      if (body.code !== 0 || !body.data) return null;
+      const total = body.data.limitNum ?? 0;
+      const remaining = body.data.credit ?? 0;
+      return { remaining, total, unlimited: total === -1 };
+    }
+
+    const resp = await fetch(
+      `${ctx.spec.serverUrl}/billing/meter/get-user-resource-summary`,
+      { method: "POST", headers, body: "{}" },
+    );
+    if (!resp.ok) return null;
+    const body = (await resp.json()) as ResourceSummaryResponse;
+    if (body.code !== 0 || !body.data) return null;
+    let total = 0;
+    let remaining = 0;
+    for (const p of body.data.Packages || []) {
+      total += Number(p.CycleTotalCapacity) || 0;
+      remaining += Number(p.CycleRemainCapacity) || 0;
+    }
+    return { remaining, total, unlimited: false };
+  } catch {
+    return null;
+  }
+}
+
 async function fetchRemoteModels(
   accessToken: string,
   ctx: Runtime,
@@ -644,12 +726,27 @@ export async function TencentAuthPlugin(
         const all = JSON.parse(raw) as Record<string, { type: string; access?: string }>;
         const auth = all[spec.id];
         if (auth?.type === "oauth" && auth.access) {
-          discovered = await Promise.race([
-            fetchRemoteModels(auth.access, ctx),
-            new Promise<RemoteModel[]>((resolve) =>
-              setTimeout(() => resolve([]), DISCOVERY_TIMEOUT_MS),
-            ),
+          const access = auth.access;
+          const [modelsResult, creditsResult] = await Promise.all([
+            Promise.race([
+              fetchRemoteModels(access, ctx),
+              new Promise<RemoteModel[]>((resolve) =>
+                setTimeout(() => resolve([]), DISCOVERY_TIMEOUT_MS),
+              ),
+            ]),
+            Promise.race([
+              fetchCredits(access, ctx),
+              new Promise<CreditBalance | null>((resolve) =>
+                setTimeout(() => resolve(null), DISCOVERY_TIMEOUT_MS),
+              ),
+            ]),
           ]);
+          discovered = modelsResult;
+          const accountName = resolveAccountName(access);
+          const nameParts = [spec.name];
+          if (accountName) nameParts.push(accountName);
+          if (creditsResult) nameParts.push(formatCredits(creditsResult));
+          provider.name = nameParts.join(" · ");
         }
       } catch {
         // auth not available yet, use fallback
