@@ -685,50 +685,31 @@ async function fetchRemoteModels(
 }
 
 /**
- * 合并聊天补全 SSE 流中交错的 reasoning_content 帧。
+ * 从聊天补全 SSE 流中剔除 reasoning_content。
  *
  * 上游（如 GLM-5.3）会在同一 choice 内把 `reasoning_content` 与
  * `content` / `tool_calls` 逐帧交替下发。opencode 内置的
  * @ai-sdk/openai-compatible 解析器只要一收到 content/tool_calls 就发
  * `reasoning-end`，之后再收到 reasoning 又发 `reasoning-start`，于是每交替
  * 一次就生成一条独立的 reasoning part，TUI 会为每条打印一行
- * `+ Thought: X ms`，导致控制台刷屏卡顿。
+ * `+ Thought: X ms`，长会话下刷出成百上千行导致控制台卡顿。
  *
- * 本函数把每个 choice 的 reasoning_content 暂存，等到该 choice 首次出现
- * content / tool_calls 帧时，先把累积的 reasoning 作为**单独一帧**整体吐出，
- * 再吐出该 content / tool_calls 帧；流的末尾再 flush 剩余 reasoning。
- * 这样每个 choice 最多只会产生一次 reasoning-start/end，Thought 只显示一次。
+ * 该问题在 SSE 层无法既保留思维链又只产生一个 reasoning part，故这里直接
+ * 把每个 delta 的 `reasoning_content` / `reasoning` 置空，opencode 便不会再
+ * 创建任何 reasoning part，从根上消除 Thought 刷屏。content / tool_calls /
+ * usage 等其它字段原样透传，流式行为不变。
  */
-function coalesceReasoningStream(
+function stripReasoningStream(
   body: ReadableStream<Uint8Array>,
 ): ReadableStream<Uint8Array> {
   const decoder = new TextDecoder();
   const encoder = new TextEncoder();
-  const pending = new Map<number, string>();
   let buffer = "";
 
-  const makeChunk = (reasoning: string, original: string): string => {
-    const replacement = `"reasoning_content":${JSON.stringify(reasoning)}`;
-    if (/"reasoning_content"\s*:/.test(original)) {
-      return original.replace(
-        /"reasoning_content"\s*:\s*(?:"(?:\\.|[^"\\])*"|null)/,
-        replacement,
-      );
-    }
-    const idx = original.indexOf("{");
-    if (idx < 0) return original;
-    return `${original.slice(0, idx + 1)}${replacement},${original.slice(idx + 1)}`;
-  };
-
-  const processEvent = (
-    raw: string,
-    emit: (chunk: string) => void,
-  ): void => {
+  const processEvent = (raw: string, emit: (chunk: string) => void): void => {
     const dataLines: string[] = [];
-    const otherLines: string[] = [];
     for (const line of raw.split("\n")) {
       if (line.startsWith("data:")) dataLines.push(line.slice(5).trimStart());
-      else otherLines.push(line);
     }
     if (dataLines.length === 0) {
       if (raw.trim().length > 0) emit(raw);
@@ -736,23 +717,12 @@ function coalesceReasoningStream(
     }
     const payload = dataLines.join("\n");
     if (payload === "[DONE]") {
-      for (const [index, text] of pending) {
-        if (!text) continue;
-        const base = JSON.stringify({
-          choices: [{ index, delta: { reasoning_content: text } }],
-        });
-        emit(`data: ${base}`);
-      }
-      pending.clear();
       emit(raw);
       return;
     }
 
     let parsed: {
-      choices?: Array<{
-        index?: number;
-        delta?: Record<string, unknown>;
-      }>;
+      choices?: Array<{ delta?: Record<string, unknown> }>;
     };
     try {
       parsed = JSON.parse(payload);
@@ -763,43 +733,24 @@ function coalesceReasoningStream(
 
     const choice = parsed.choices?.[0];
     const delta = choice?.delta;
-    if (!choice || !delta) {
+    if (!delta) {
       emit(raw);
       return;
     }
-    const index = choice.index ?? 0;
-    const reasoning =
-      typeof delta.reasoning_content === "string"
-        ? (delta.reasoning_content as string)
-        : typeof delta.reasoning === "string"
-          ? (delta.reasoning as string)
-          : undefined;
-    const hasContent =
-      typeof delta.content === "string" && delta.content.length > 0;
-    const hasTools = delta.tool_calls != null;
 
-    if (reasoning !== undefined && !hasContent && !hasTools) {
-      pending.set(index, (pending.get(index) || "") + reasoning);
-      return;
-    }
-
-    const buffered = pending.get(index);
-    if (buffered) {
-      pending.delete(index);
-      if (reasoning !== undefined) {
-        emit(makeChunk(buffered + reasoning, raw));
-      } else {
-        emit(
-          `data: ${JSON.stringify({
-            choices: [{ index, delta: { reasoning_content: buffered } }],
-          })}`,
-        );
-        emit(raw);
+    let mutated = false;
+    for (const key of ["reasoning_content", "reasoning"] as const) {
+      if (typeof delta[key] === "string" && (delta[key] as string).length > 0) {
+        delta[key] = "";
+        mutated = true;
       }
-      return;
     }
 
-    emit(raw);
+    if (!mutated) {
+      emit(raw);
+      return;
+    }
+    emit(`data: ${JSON.stringify(parsed)}`);
   };
 
   return body.pipeThrough(
@@ -1013,7 +964,7 @@ export async function TencentAuthPlugin(
               response.body &&
               contentType.includes("text/event-stream")
             ) {
-              return new Response(coalesceReasoningStream(response.body), {
+              return new Response(stripReasoningStream(response.body), {
                 status: response.status,
                 statusText: response.statusText,
                 headers: response.headers,
