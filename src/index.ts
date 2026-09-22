@@ -685,7 +685,7 @@ async function fetchRemoteModels(
 }
 
 /**
- * 从聊天补全 SSE 流中剔除 reasoning_content。
+ * 把聊天补全 SSE 流中的 reasoning 文本并入 content。
  *
  * 上游（如 GLM-5.3）会在同一 choice 内把 `reasoning_content` 与
  * `content` / `tool_calls` 逐帧交替下发。opencode 内置的
@@ -694,12 +694,14 @@ async function fetchRemoteModels(
  * 一次就生成一条独立的 reasoning part，TUI 会为每条打印一行
  * `+ Thought: X ms`，长会话下刷出成百上千行导致控制台卡顿。
  *
- * 该问题在 SSE 层无法既保留思维链又只产生一个 reasoning part，故这里直接
- * 把每个 delta 的 `reasoning_content` / `reasoning` 置空，opencode 便不会再
- * 创建任何 reasoning part，从根上消除 Thought 刷屏。content / tool_calls /
- * usage 等其它字段原样透传，流式行为不变。
+ * 该问题在 SSE 层无法既保留 reasoning 语义又只产生一个 reasoning part，故这里
+ * 把每个 delta 的 `reasoning_content` / `reasoning` **并入 `content`**
+ * （前置到已有 content 之前）：opencode 会把它们当作正文文本追加，不再创建
+ * 任何 reasoning part，从根上消除 Thought 刷屏；同时**不丢失任何文本**，
+ * 避免某些模型把正文放在 reasoning 字段、剥离后结果为空的情况。
+ * tool_calls / usage 等其它字段原样透传。
  */
-function stripReasoningStream(
+function foldReasoningIntoContentStream(
   body: ReadableStream<Uint8Array>,
 ): ReadableStream<Uint8Array> {
   const decoder = new TextDecoder();
@@ -738,18 +740,22 @@ function stripReasoningStream(
       return;
     }
 
-    let mutated = false;
+    let reasoning = "";
     for (const key of ["reasoning_content", "reasoning"] as const) {
-      if (typeof delta[key] === "string" && (delta[key] as string).length > 0) {
+      const value = delta[key];
+      if (typeof value === "string" && value.length > 0) {
+        reasoning += value;
         delta[key] = "";
-        mutated = true;
       }
     }
 
-    if (!mutated) {
+    if (reasoning.length === 0) {
       emit(raw);
       return;
     }
+
+    const content = typeof delta.content === "string" ? delta.content : "";
+    delta.content = reasoning + content;
     emit(`data: ${JSON.stringify(parsed)}`);
   };
 
@@ -964,11 +970,14 @@ export async function TencentAuthPlugin(
               response.body &&
               contentType.includes("text/event-stream")
             ) {
-              return new Response(stripReasoningStream(response.body), {
-                status: response.status,
-                statusText: response.statusText,
-                headers: response.headers,
-              });
+              return new Response(
+                foldReasoningIntoContentStream(response.body),
+                {
+                  status: response.status,
+                  statusText: response.statusText,
+                  headers: response.headers,
+                },
+              );
             }
 
             return response;
