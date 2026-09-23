@@ -685,7 +685,7 @@ async function fetchRemoteModels(
 }
 
 /**
- * 把聊天补全 SSE 流中的 reasoning 文本并入 content。
+ * 把聊天补全 SSE 流中分散的 reasoning 合并为一段、在流末尾统一吐出。
  *
  * 上游（如 GLM-5.3）会在同一 choice 内把 `reasoning_content` 与
  * `content` / `tool_calls` 逐帧交替下发。opencode 内置的
@@ -694,19 +694,39 @@ async function fetchRemoteModels(
  * 一次就生成一条独立的 reasoning part，TUI 会为每条打印一行
  * `+ Thought: X ms`，长会话下刷出成百上千行导致控制台卡顿。
  *
- * 该问题在 SSE 层无法既保留 reasoning 语义又只产生一个 reasoning part，故这里
- * 把每个 delta 的 `reasoning_content` / `reasoning` **并入 `content`**
- * （前置到已有 content 之前）：opencode 会把它们当作正文文本追加，不再创建
- * 任何 reasoning part，从根上消除 Thought 刷屏；同时**不丢失任何文本**，
- * 避免某些模型把正文放在 reasoning 字段、剥离后结果为空的情况。
- * tool_calls / usage 等其它字段原样透传。
+ * 解析器的规则决定了：只有让某个 choice 的 reasoning 帧**连续且只出现一次**
+ * 才能只产生一条 reasoning part。故这里把每个 choice 的 reasoning 文本全部
+ * 缓存，遇到 reasoning 帧时**吞掉**（不下发），其余帧（content / tool_calls /
+ * usage / finish_reason）原样透传；在流结束（`[DONE]` 或 flush）时，为每个曾
+ * 收到 reasoning 的 choice 各补发**一帧**完整 reasoning，再发 `[DONE]`。
+ *
+ * 结果：思维链完整保留，每个 choice 只显示一条 `+ Thought`；代价是思维链在
+ * 本轮回答结束后才出现（正文仍逐字实时）。不丢失任何文本。
  */
-function foldReasoningIntoContentStream(
+function mergeReasoningStream(
   body: ReadableStream<Uint8Array>,
 ): ReadableStream<Uint8Array> {
   const decoder = new TextDecoder();
   const encoder = new TextEncoder();
   let buffer = "";
+  const reasoningByIndex = new Map<number, string>();
+
+  const flushReasoning = (emit: (chunk: string) => void): void => {
+    for (const [index, text] of reasoningByIndex) {
+      if (!text) continue;
+      emit(
+        `data: ${JSON.stringify({
+          choices: [
+            {
+              index,
+              delta: { role: "assistant", reasoning_content: text },
+            },
+          ],
+        })}`,
+      );
+    }
+    reasoningByIndex.clear();
+  };
 
   const processEvent = (raw: string, emit: (chunk: string) => void): void => {
     const dataLines: string[] = [];
@@ -719,12 +739,18 @@ function foldReasoningIntoContentStream(
     }
     const payload = dataLines.join("\n");
     if (payload === "[DONE]") {
+      flushReasoning(emit);
       emit(raw);
       return;
     }
 
     let parsed: {
-      choices?: Array<{ delta?: Record<string, unknown> }>;
+      usage?: unknown;
+      choices?: Array<{
+        index?: number;
+        finish_reason?: unknown;
+        delta?: Record<string, unknown>;
+      }>;
     };
     try {
       parsed = JSON.parse(payload);
@@ -745,18 +771,40 @@ function foldReasoningIntoContentStream(
       const value = delta[key];
       if (typeof value === "string" && value.length > 0) {
         reasoning += value;
-        delta[key] = "";
+        delete delta[key];
       }
     }
 
-    if (reasoning.length === 0) {
-      emit(raw);
+    if (reasoning.length > 0) {
+      const index = choice?.index ?? 0;
+      reasoningByIndex.set(index, (reasoningByIndex.get(index) || "") + reasoning);
+    }
+
+    // 只用「纯 reasoning（最多带 role）」的帧做缓冲，其余帧一律透传，
+    // 以免吞掉携带 finish_reason / usage / 其他字段的收尾帧。
+    const remainingKeys = Object.keys(delta).filter(
+      (key) => key !== "role" && delta[key] !== undefined,
+    );
+    const onlyReasoning =
+      reasoning.length > 0 &&
+      remainingKeys.length === 0 &&
+      parsed.usage == null &&
+      choice?.finish_reason == null;
+
+    if (onlyReasoning) {
       return;
     }
 
-    const content = typeof delta.content === "string" ? delta.content : "";
-    delta.content = reasoning + content;
-    emit(`data: ${JSON.stringify(parsed)}`);
+    const clean: Record<string, unknown> = { ...delta };
+    for (const key of ["reasoning_content", "reasoning"] as const) {
+      if (key in clean) delete clean[key];
+    }
+    emit(
+      `data: ${JSON.stringify({
+        ...parsed,
+        choices: [{ ...choice, delta: clean }],
+      })}`,
+    );
   };
 
   return body.pipeThrough(
@@ -780,6 +828,9 @@ function foldReasoningIntoContentStream(
             controller.enqueue(encoder.encode(out + "\n\n")),
           );
         }
+        flushReasoning((out) =>
+          controller.enqueue(encoder.encode(out + "\n\n")),
+        );
       },
     }),
   );
@@ -970,14 +1021,11 @@ export async function TencentAuthPlugin(
               response.body &&
               contentType.includes("text/event-stream")
             ) {
-              return new Response(
-                foldReasoningIntoContentStream(response.body),
-                {
-                  status: response.status,
-                  statusText: response.statusText,
-                  headers: response.headers,
-                },
-              );
+              return new Response(mergeReasoningStream(response.body), {
+                status: response.status,
+                statusText: response.statusText,
+                headers: response.headers,
+              });
             }
 
             return response;
