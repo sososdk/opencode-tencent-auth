@@ -1,6 +1,6 @@
 {
   "name": "opencode-tencent-auth",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "description": "OpenCode plugin for CodeBuddy & WorkBuddy (CN + International) IOA authentication",
   "type": "module",
   "main": "./dist/index.js",
